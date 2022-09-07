@@ -62,7 +62,7 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
         let result = self
             .kv_client
             .as_ref()
-            .expect("Unreachable: kv_client has not been initialised in Dispatch")
+            .expect("Unreachable: kv_client has not been initialized in Dispatch")
             .dispatch(&self.request)
             .await;
         let result = stats.done(result);
@@ -101,6 +101,7 @@ where
     ) -> Result<<Self as Plan>::Result> {
         let shards = current_plan.shards(&pd_client).collect::<Vec<_>>().await;
         let mut handles = Vec::new();
+        debug!("retry_multi_region request shard size = {}", shards.len());
         for shard in shards {
             let (shard, region_store) = shard?;
             let mut clone = current_plan.clone();
@@ -434,6 +435,10 @@ where
             }
 
             if self.backoff.is_none() {
+                debug!(
+                    "resolve lock failed because backoff is none, locks={:?}",
+                    locks
+                );
                 return Err(Error::ResolveLockError);
             }
 
@@ -442,7 +447,12 @@ where
                 result = self.inner.execute().await?;
             } else {
                 match clone.backoff.next_delay_duration() {
-                    None => return Err(Error::ResolveLockError),
+                    None => {
+                        debug!(
+                            "resolve lock failed because next_delay_duration is none, current_attempts={:?}", clone.backoff.current_attempts()
+                        );
+                        return Err(Error::ResolveLockError);
+                    },
                     Some(delay_duration) => {
                         sleep(delay_duration).await;
                         result = clone.inner.execute().await?;
