@@ -67,6 +67,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     is_heartbeat_started: bool,
     start_instant: Instant,
     logger: Logger,
+    committer: Option<Committer<PdC>>,
 }
 
 impl<PdC: PdClient> Transaction<PdC> {
@@ -90,6 +91,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             is_heartbeat_started: false,
             start_instant: std::time::Instant::now(),
             logger,
+            committer: None,
         }
     }
 
@@ -669,6 +671,82 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// Get the start timestamp of this transaction.
     pub fn start_timestamp(&self) -> Timestamp {
         self.timestamp.clone()
+    }
+
+    pub async fn prewrite_primary(&mut self, primary_key: Option<Key>) -> Result<(Key, Timestamp)> {
+        let primary_key = if let Some(key) = primary_key {
+            key
+        } else {
+            if let Some(key) = self.buffer.get_primary_key() {
+                key
+            }else {
+                warn!(self.logger, "prewrite_primary primary key is none");
+                return Err(Error::NoPrimaryKey)
+            }
+        };
+        self.prewrite(primary_key.clone(), self.timestamp.clone())
+            .await?;
+        Ok((primary_key, self.timestamp.clone()))
+    }
+    pub async fn prewrite_secondary(
+        &mut self,
+        primary_key: Key,
+        start_ts: Timestamp,
+    ) -> Result<()> {
+        self.prewrite(primary_key, start_ts).await?;
+        Ok(())
+    }
+    async fn prewrite(&mut self, primary_key: Key, start_ts: Timestamp) -> Result<()> {
+        debug!(self.logger, "commiting transaction prewrite_primary");
+        {
+            let mut status = self.status.write().await;
+            if !matches!(
+                *status,
+                TransactionStatus::StartedCommit | TransactionStatus::Active
+            ) {
+                return Err(Error::OperationAfterCommitError);
+            }
+            *status = TransactionStatus::StartedCommit;
+        }
+        let mutations = self.buffer.to_proto_mutations();
+        if mutations.is_empty() {
+            error!(self.logger, "commiting transaction use empty buffer");
+            return Err(Error::NoPrimaryKey);
+        }
+
+        self.start_auto_heartbeat().await;
+        self.timestamp = start_ts;
+        self.committer = Some(Committer::new(
+            Some(primary_key),
+            mutations,
+            self.timestamp.clone(),
+            self.rpc.clone(),
+            self.options.clone(),
+            self.buffer.get_write_size() as u64,
+            self.start_instant,
+            self.logger.new(o!("child" => 1)),
+        ));
+        debug!(self.logger, "commiting transaction prewrite");
+        self.committer.as_mut().unwrap().prewrite().await?;
+        Ok(())
+    }
+
+    pub async fn commit_primary(&mut self) -> Result<Timestamp> {
+        self.committer.as_mut().unwrap().commit_primary().await
+    }
+    pub async fn commit_secondary(&mut self, commit_ts: Timestamp) {
+        let committer = std::mem::replace(&mut self.committer, None);
+        committer
+            .unwrap()
+            .commit_secondary(commit_ts.clone())
+            .map(|res| {
+                if let Err(e) = res {
+                    log::warn!("Failed to commit secondary keys: {}", e);
+                }
+            })
+            .await;
+        let mut status = self.status.write().await;
+        *status = TransactionStatus::Committed;
     }
 
     /// Send a heart beat message to keep the transaction alive on the server and update its TTL.
