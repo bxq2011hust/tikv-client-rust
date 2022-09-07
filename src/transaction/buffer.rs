@@ -40,6 +40,11 @@ impl Buffer {
         self.primary_key.get_or_insert_with(|| key.clone());
     }
 
+    /// Set the primary key
+    pub fn set_primary_key(&mut self, key: &Key) {
+        self.primary_key = Some(key.clone());
+    }
+
     /// Get a value from the buffer.
     /// If the returned value is None, it means the key doesn't exist in buffer yet.
     pub fn get(&self, key: &Key) -> Option<Value> {

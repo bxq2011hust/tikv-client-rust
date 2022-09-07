@@ -1,16 +1,17 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use derive_new::new;
+use fail::fail_point;
+use futures::prelude::*;
+use log::debug;
+use log::error;
+use log::info;
+use log::warn;
 use std::iter;
 use std::sync::atomic;
 use std::sync::atomic::AtomicU8;
 use std::sync::Arc;
 use std::time::Instant;
-
-use derive_new::new;
-use fail::fail_point;
-use futures::prelude::*;
-use log::debug;
-use log::warn;
 use tokio::time::Duration;
 
 use crate::backoff::Backoff;
@@ -33,6 +34,7 @@ use crate::request::TruncateKeyspace;
 use crate::timestamp::TimestampExt;
 use crate::transaction::buffer::Buffer;
 use crate::transaction::lowering::*;
+use crate::transaction::requests::TransactionStatusKind;
 use crate::BoundRange;
 use crate::Error;
 use crate::Key;
@@ -87,6 +89,7 @@ pub struct Transaction<PdC: PdClient = PdRpcClient> {
     keyspace: Keyspace,
     is_heartbeat_started: bool,
     start_instant: Instant,
+    committer: Option<Committer<PdC>>,
 }
 
 impl<PdC: PdClient> Transaction<PdC> {
@@ -110,6 +113,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             keyspace,
             is_heartbeat_started: false,
             start_instant: std::time::Instant::now(),
+            committer: None,
         }
     }
 
@@ -702,7 +706,10 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// # });
     /// ```
     pub async fn rollback(&mut self) -> Result<()> {
-        debug!("rolling back transaction");
+        debug!(
+            "rolling back transaction, start_ts={:?}",
+            self.timestamp.version()
+        );
         if !self.transit_status(
             |status| {
                 matches!(
@@ -717,20 +724,70 @@ impl<PdC: PdClient> Transaction<PdC> {
             return Err(Error::OperationAfterCommitError);
         }
 
+        // before rollback, check if the transaction has been committed.
         let primary_key = self.buffer.get_primary_key();
         let mutations = self.buffer.to_proto_mutations();
-        let res = Committer::new(
-            primary_key,
-            mutations,
-            self.timestamp.clone(),
-            self.rpc.clone(),
-            self.options.clone(),
-            self.keyspace,
-            self.buffer.get_write_size() as u64,
-            self.start_instant,
-        )
-        .rollback()
-        .await;
+        if self.committer.is_some() {
+            let current_timestamp = self.rpc.clone().get_timestamp().await?;
+            let request = new_check_txn_status_request(
+                primary_key.clone().unwrap(),
+                self.timestamp.clone(),
+                current_timestamp.clone(),
+            );
+            let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
+                .retry_multi_region(DEFAULT_REGION_BACKOFF)
+                .merge(CollectSingle)
+                .post_process_default()
+                .plan();
+            let status = plan.execute().await?;
+
+            match status.kind {
+                TransactionStatusKind::Committed(commit_ts) => {
+                    // do nothing modify status to committed
+                    info!(
+                        "the rollback transaction has been committed, start_ts={:?} ,commit_ts={:?}",
+                        self.timestamp.clone(),
+                        commit_ts
+                    );
+                    self.set_status(TransactionStatus::Committed);
+                    if self.committer.is_some() {
+                        self.commit_secondary(commit_ts.clone()).await;
+                    }
+                    return Ok(());
+                }
+                TransactionStatusKind::RolledBack => {
+                    info!("transaction has been rolled back");
+                }
+                TransactionStatusKind::Locked(ttl, lock_info) => {
+                    // do nothing before ttl expire
+                    info!(
+                        "transaction has been locked, ttl={:?}, lock_info={:?}",
+                        ttl, lock_info
+                    );
+                }
+            }
+        }
+
+        self.set_status(TransactionStatus::StartedRollback);
+        let res;
+        if self.committer.is_some() {
+            let committer = std::mem::replace(&mut self.committer, None);
+            res = committer.unwrap().rollback().await;
+        } else {
+            let mutations = self.buffer.to_proto_mutations();
+            res = Committer::new(
+                primary_key,
+                mutations,
+                self.timestamp.clone(),
+                self.rpc.clone(),
+                self.options.clone(),
+                self.keyspace,
+                self.buffer.get_write_size() as u64,
+                self.start_instant,
+            )
+            .rollback()
+            .await;
+        };
 
         if res.is_ok() {
             self.set_status(TransactionStatus::Rolledback);
@@ -741,6 +798,109 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// Get the start timestamp of this transaction.
     pub fn start_timestamp(&self) -> Timestamp {
         self.timestamp.clone()
+    }
+
+    pub async fn prewrite_primary(&mut self, primary_key: Option<Key>) -> Result<(Key, Timestamp)> {
+        let primary_key = if let Some(key) = primary_key {
+            key
+        } else {
+            if let Some(key) = self.buffer.get_primary_key() {
+                key
+            } else {
+                warn!("prewrite_primary primary key is none");
+                return Err(Error::NoPrimaryKey);
+            }
+        };
+        self.prewrite(primary_key.clone(), self.timestamp.clone(), true)
+            .await?;
+        Ok((primary_key, self.timestamp.clone()))
+    }
+    pub async fn prewrite_secondary(
+        &mut self,
+        primary_key: Key,
+        start_ts: Timestamp,
+    ) -> Result<()> {
+        self.prewrite(primary_key, start_ts, false).await?;
+        Ok(())
+    }
+    async fn prewrite(
+        &mut self,
+        primary_key: Key,
+        start_ts: Timestamp,
+        primary: bool,
+    ) -> Result<()> {
+        info!(
+            "prewrite start, primary={}, start_ts={:?}, primary_key={:?}",
+            primary,
+            start_ts.version(),
+            primary_key
+        );
+        let start = Instant::now();
+        if !self.transit_status(
+            |status| {
+                matches!(
+                    status,
+                    TransactionStatus::StartedCommit | TransactionStatus::Active
+                )
+            },
+            TransactionStatus::StartedCommit,
+        ) {
+            return Err(Error::OperationAfterCommitError);
+        }
+        self.buffer.set_primary_key(&primary_key);
+        let mutations = self.buffer.to_proto_mutations();
+        if mutations.is_empty() {
+            error!("prewrite use empty buffer");
+            return Err(Error::NoPrimaryKey);
+        }
+        if primary {
+            self.start_auto_heartbeat().await;
+        }
+        self.timestamp = start_ts;
+        self.committer = Some(Committer::new(
+            Some(primary_key),
+            mutations,
+            self.timestamp.clone(),
+            self.rpc.clone(),
+            self.options.clone(),
+            self.keyspace,
+            self.buffer.get_write_size() as u64,
+            self.start_instant,
+        ));
+        self.committer.as_mut().unwrap().prewrite().await?;
+        info!(
+            "prewrite finished, primary={}, start_ts={:?}, time={:?}",
+            primary,
+            self.timestamp.version(),
+            start.elapsed(),
+        );
+        Ok(())
+    }
+
+    pub async fn commit_primary(&mut self) -> Result<Timestamp> {
+        info!(
+            "commit_primary start, start_ts={:?}",
+            self.timestamp.version()
+        );
+        self.committer.as_mut().unwrap().commit_primary().await
+    }
+    pub async fn commit_secondary(&mut self, commit_ts: Timestamp) {
+        let committer = std::mem::replace(&mut self.committer, None);
+        committer
+            .unwrap()
+            .commit_secondary(commit_ts.clone())
+            .map(|res| {
+                if let Err(e) = res {
+                    log::warn!("Failed to commit secondary keys: {}", e);
+                }
+            })
+            .await;
+        self.set_status(TransactionStatus::Committed);
+        info!(
+            "commit_secondary finished, start_ts={:?}, commit_ts={:?}",
+            self.timestamp.version(),
+            commit_ts.version()
+        );
     }
 
     /// Send a heart beat message to keep the transaction alive on the server and update its TTL.
@@ -1289,6 +1449,7 @@ impl<PdC: PdClient> Committer<PdC> {
                 Ok(commit_ts) => commit_ts,
                 Err(e) => {
                     return if self.undetermined {
+                        error!("commit err:{}", e);
                         Err(Error::UndeterminedError(Box::new(e)))
                     } else {
                         Err(e)
@@ -1306,6 +1467,7 @@ impl<PdC: PdClient> Committer<PdC> {
 
     async fn prewrite(&mut self) -> Result<Option<Timestamp>> {
         debug!("prewriting");
+        let start = Instant::now();
         let primary_lock = self.primary_key.clone().unwrap();
         let elapsed = self.start_instant.elapsed().as_millis() as u64;
         let lock_ttl = self.calc_txn_lock_ttl();
@@ -1335,6 +1497,8 @@ impl<PdC: PdClient> Committer<PdC> {
             .collect();
         // FIXME set max_commit_ts and min_commit_ts
 
+        let prepare_request_duration = start.elapsed();
+        let start = Instant::now();
         let plan = PlanBuilder::new(self.rpc.clone(), self.keyspace, request)
             .resolve_lock(
                 self.options.retry_options.lock_backoff.clone(),
@@ -1345,6 +1509,7 @@ impl<PdC: PdClient> Committer<PdC> {
             .extract_error()
             .plan();
         let response = plan.execute().await?;
+        let request_duration = start.elapsed();
 
         if self.options.try_one_pc && response.len() == 1 {
             if response[0].one_pc_commit_ts == 0 {
@@ -1364,7 +1529,10 @@ impl<PdC: PdClient> Committer<PdC> {
             })
             .max()
             .map(Timestamp::from_version);
-
+        debug!(
+            "prewrite finished, prepare_request_duration:{:?}, request_duration:{:?}",
+            prepare_request_duration, request_duration
+        );
         Ok(min_commit_ts)
     }
 
@@ -1396,7 +1564,6 @@ impl<PdC: PdClient> Committer<PdC> {
                 }
             })
             .await?;
-
         Ok(commit_version)
     }
 
@@ -1495,6 +1662,9 @@ impl<PdC: PdClient> Committer<PdC> {
         }
         lock_ttl
     }
+    // fn get_primary_key(&self) -> Option<Key> {
+    //     self.primary_key.clone()
+    // }
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]

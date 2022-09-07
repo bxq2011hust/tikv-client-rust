@@ -311,4 +311,12 @@ impl Client {
     fn new_transaction(&self, timestamp: Timestamp, options: TransactionOptions) -> Transaction {
         Transaction::new(timestamp, self.pd.clone(), options, self.keyspace)
     }
+
+    pub fn new_transaction_with_options(
+        &self,
+        timestamp: Timestamp,
+        options: TransactionOptions,
+    ) -> Transaction {
+        Transaction::new(timestamp, self.pd.clone(), options, self.keyspace)
+    }
 }

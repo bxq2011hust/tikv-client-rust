@@ -286,7 +286,7 @@ impl Shardable for kvrpcpb::PrewriteRequest {
     ) -> BoxStream<'static, Result<(Self::Shard, RegionStore)>> {
         let mut mutations = self.mutations.clone();
         mutations.sort_by(|a, b| a.key.cmp(&b.key));
-
+        log::debug!("PrewriteRequest shards");
         store_stream_for_keys(mutations.into_iter(), pd_client.clone())
             .flat_map(|result| match result {
                 Ok((mutations, store)) => stream::iter(kvrpcpb::PrewriteRequest::batches(
