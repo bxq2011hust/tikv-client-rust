@@ -679,12 +679,12 @@ impl<PdC: PdClient> Transaction<PdC> {
         } else {
             if let Some(key) = self.buffer.get_primary_key() {
                 key
-            }else {
+            } else {
                 warn!(self.logger, "prewrite_primary primary key is none");
-                return Err(Error::NoPrimaryKey)
+                return Err(Error::NoPrimaryKey);
             }
         };
-        self.prewrite(primary_key.clone(), self.timestamp.clone())
+        self.prewrite(primary_key.clone(), self.timestamp.clone(), true)
             .await?;
         Ok((primary_key, self.timestamp.clone()))
     }
@@ -693,10 +693,15 @@ impl<PdC: PdClient> Transaction<PdC> {
         primary_key: Key,
         start_ts: Timestamp,
     ) -> Result<()> {
-        self.prewrite(primary_key, start_ts).await?;
+        self.prewrite(primary_key, start_ts, false).await?;
         Ok(())
     }
-    async fn prewrite(&mut self, primary_key: Key, start_ts: Timestamp) -> Result<()> {
+    async fn prewrite(
+        &mut self,
+        primary_key: Key,
+        start_ts: Timestamp,
+        primary: bool,
+    ) -> Result<()> {
         debug!(self.logger, "commiting transaction prewrite_primary");
         {
             let mut status = self.status.write().await;
@@ -713,8 +718,9 @@ impl<PdC: PdClient> Transaction<PdC> {
             error!(self.logger, "commiting transaction use empty buffer");
             return Err(Error::NoPrimaryKey);
         }
-
-        self.start_auto_heartbeat().await;
+        if primary {
+            self.start_auto_heartbeat().await;
+        }
         self.timestamp = start_ts;
         self.committer = Some(Committer::new(
             Some(primary_key),
