@@ -16,15 +16,18 @@ use common::{init, pd_addrs};
 // use futures::prelude::*;
 use rand::{seq::IteratorRandom, thread_rng, Rng};
 use serial_test::serial;
+use slog::{o, Drain};
 use std::{
     collections::{HashMap, HashSet},
     convert::TryInto,
+    fs::OpenOptions,
     iter, println,
 };
 use tikv_client::{
     transaction::HeartbeatOption, Key, Result, Transaction, TransactionClient, TransactionOptions,
     Value,
 };
+
 use tokio::time::Instant;
 
 // Parameters used in test
@@ -598,7 +601,22 @@ async fn txn_pessimistic_heartbeat() -> Result<()> {
 #[serial]
 async fn bcos_txn_commit() -> Result<()> {
     init().await?;
-    let client = TransactionClient::new_with_config(pd_addrs(), Default::default(), None).await?;
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open("test.log")
+        .expect("open log file failed");
+
+    let decorator = slog_term::PlainDecorator::new(file);
+    let drain = slog_term::FullFormat::new(decorator)
+        .build()
+        .filter_level(slog::Level::Debug)
+        .fuse();
+    let drain = slog_async::Async::new(drain).build().fuse();
+    let log = slog::Logger::root(drain, o!());
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Default::default(), Some(log)).await?;
     let key1 = "key".to_owned();
     let key2 = "another key".to_owned();
     let value1 = b"some value".to_owned();

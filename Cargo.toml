@@ -27,7 +27,7 @@ futures-timer = "3.0"
 grpcio = { version = "0.10", features = [ "prost-codec", "openssl-vendored" ], default-features = false }
 lazy_static = "1"
 log = "0.4"
-prometheus = { version = "0.12", features = [ "push", "process" ], default-features = false } 
+prometheus = { version = "0.12", features = [ "push", "process" ], default-features = false }
 rand = "0.8"
 regex = "1"
 semver = "1.0"
@@ -43,7 +43,7 @@ tikv-client-common = { version = "0.1.0", path = "tikv-client-common" }
 tikv-client-pd = { version = "0.1.0", path = "tikv-client-pd" }
 tikv-client-proto = { version = "0.1.0", path = "tikv-client-proto" }
 tikv-client-store = { version = "0.1.0", path = "tikv-client-store" }
-
+slog-async = "2.7.0"
 
 [dev-dependencies]
 clap = "2"

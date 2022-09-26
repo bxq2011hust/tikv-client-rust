@@ -434,7 +434,7 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// # });
     /// ```
     pub async fn put(&mut self, key: impl Into<Key>, value: impl Into<Value>) -> Result<()> {
-        debug!(self.logger, "invoking transactional put request");
+        trace!(self.logger, "invoking transactional put request");
         self.check_allow_operation().await?;
         let key = key.into();
         if self.is_pessimistic() {
@@ -628,7 +628,11 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// # });
     /// ```
     pub async fn rollback(&mut self) -> Result<()> {
-        debug!(self.logger, "rolling back transaction");
+        debug!(
+            self.logger,
+            "rolling back transaction, start_ts={:?}",
+            self.timestamp.version()
+        );
         {
             let status = self.status.read().await;
             if !matches!(
@@ -645,21 +649,26 @@ impl<PdC: PdClient> Transaction<PdC> {
             let mut status = self.status.write().await;
             *status = TransactionStatus::StartedRollback;
         }
-
-        let primary_key = self.buffer.get_primary_key();
-        let mutations = self.buffer.to_proto_mutations();
-        let res = Committer::new(
-            primary_key,
-            mutations,
-            self.timestamp.clone(),
-            self.rpc.clone(),
-            self.options.clone(),
-            self.buffer.get_write_size() as u64,
-            self.start_instant,
-            self.logger.new(o!("child" => 1)),
-        )
-        .rollback()
-        .await;
+        let res;
+        if self.committer.is_some() {
+            let committer = std::mem::replace(&mut self.committer, None);
+            res = committer.unwrap().rollback().await;
+        } else {
+            let primary_key = self.buffer.get_primary_key();
+            let mutations = self.buffer.to_proto_mutations();
+            res = Committer::new(
+                primary_key,
+                mutations,
+                self.timestamp.clone(),
+                self.rpc.clone(),
+                self.options.clone(),
+                self.buffer.get_write_size() as u64,
+                self.start_instant,
+                self.logger.new(o!("child" => 1)),
+            )
+            .rollback()
+            .await;
+        };
 
         if res.is_ok() {
             let mut status = self.status.write().await;
@@ -702,7 +711,13 @@ impl<PdC: PdClient> Transaction<PdC> {
         start_ts: Timestamp,
         primary: bool,
     ) -> Result<()> {
-        debug!(self.logger, "commiting transaction prewrite_primary");
+        info!(
+            self.logger,
+            "prewrite start, primary={}, start_ts={:?}, primary_key={:?}",
+            primary,
+            start_ts.version(),
+            primary_key
+        );
         {
             let mut status = self.status.write().await;
             if !matches!(
@@ -715,7 +730,7 @@ impl<PdC: PdClient> Transaction<PdC> {
         }
         let mutations = self.buffer.to_proto_mutations();
         if mutations.is_empty() {
-            error!(self.logger, "commiting transaction use empty buffer");
+            error!(self.logger, "prewrite use empty buffer");
             return Err(Error::NoPrimaryKey);
         }
         if primary {
@@ -732,12 +747,22 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.start_instant,
             self.logger.new(o!("child" => 1)),
         ));
-        debug!(self.logger, "commiting transaction prewrite");
         self.committer.as_mut().unwrap().prewrite().await?;
+        debug!(
+            self.logger,
+            "prewrite finished, primary={}, start_ts={:?}",
+            primary,
+            self.timestamp.version(),
+        );
         Ok(())
     }
 
     pub async fn commit_primary(&mut self) -> Result<Timestamp> {
+        info!(
+            self.logger,
+            "commit_primary start, start_ts={:?}",
+            self.timestamp.version()
+        );
         self.committer.as_mut().unwrap().commit_primary().await
     }
     pub async fn commit_secondary(&mut self, commit_ts: Timestamp) {
@@ -753,6 +778,12 @@ impl<PdC: PdClient> Transaction<PdC> {
             .await;
         let mut status = self.status.write().await;
         *status = TransactionStatus::Committed;
+        info!(
+            self.logger,
+            "commit_secondary finished, start_ts={:?}, commit_ts={:?}",
+            self.timestamp.version(),
+            commit_ts.version()
+        );
     }
 
     /// Send a heart beat message to keep the transaction alive on the server and update its TTL.
@@ -1413,6 +1444,9 @@ impl<PdC: PdClient> Committer<PdC> {
             lock_ttl = lock_ttl.min(MAX_TTL).max(DEFAULT_LOCK_TTL);
         }
         lock_ttl
+    }
+    fn get_primary_key(&self) -> Option<Key> {
+        self.primary_key.clone()
     }
 }
 
