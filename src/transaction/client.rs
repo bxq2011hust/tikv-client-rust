@@ -36,18 +36,14 @@ const SCAN_LOCK_BATCH_SIZE: u32 = 1024;
 pub struct Client {
     pd: Arc<PdRpcClient>,
     logger: Logger,
-    #[allow(dead_code)]
-    logger_guard: slog_scope::GlobalLoggerGuard,
 }
 
 impl Clone for Client {
     fn clone(&self) -> Self {
         let logger = self.logger.clone();
-        let logger_guard = slog_scope::set_global_logger(logger.clone());
         Self {
             pd: self.pd.clone(),
             logger,
-            logger_guard,
         }
     }
 }
@@ -116,13 +112,11 @@ impl Client {
             )
         });
         debug!(logger, "creating new transactional client");
-        let guard = slog_scope::set_global_logger(logger.clone());
         let pd_endpoints: Vec<String> = pd_endpoints.into_iter().map(Into::into).collect();
         let pd = Arc::new(PdRpcClient::connect(&pd_endpoints, config, true, logger.clone()).await?);
         Ok(Client {
             pd,
             logger,
-            logger_guard: guard,
         })
     }
 

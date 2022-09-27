@@ -8,6 +8,7 @@ use futures::{future::try_join_all, prelude::*};
 use tikv_client_proto::{errorpb, errorpb::EpochNotMatch, kvrpcpb};
 use tikv_client_store::{HasKeyErrors, HasRegionError, HasRegionErrors, KvClient};
 use tokio::sync::Semaphore;
+use log::{debug};
 
 use crate::{
     backoff::Backoff,
@@ -424,7 +425,6 @@ where
 
             if self.backoff.is_none() {
                 debug!(
-                    slog_scope::logger(),
                     "resolve lock failed because backoff is none, locks={:?}", locks
                 );
                 return Err(Error::ResolveLockError);
@@ -437,8 +437,7 @@ where
                 match clone.backoff.next_delay_duration() {
                     None => {
                         debug!(
-                            slog_scope::logger(),
-                            "resolve lock failed because next_delay_duration is none"
+                            "resolve lock failed because next_delay_duration is none, current_attempts={:?}", clone.backoff.current_attempts()
                         );
                         return Err(Error::ResolveLockError);
                     }

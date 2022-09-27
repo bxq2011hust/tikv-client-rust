@@ -599,7 +599,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.options.clone(),
             self.buffer.get_write_size() as u64,
             self.start_instant,
-            self.logger.new(o!("child" => 1)),
+            self.logger.new(o!("commit" => "Committer")),
         )
         .commit()
         .await;
@@ -664,7 +664,7 @@ impl<PdC: PdClient> Transaction<PdC> {
                 self.options.clone(),
                 self.buffer.get_write_size() as u64,
                 self.start_instant,
-                self.logger.new(o!("child" => 1)),
+                self.logger.new(o!("rollback" => "Committer")),
             )
             .rollback()
             .await;
@@ -745,7 +745,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.options.clone(),
             self.buffer.get_write_size() as u64,
             self.start_instant,
-            self.logger.new(o!("child" => 1)),
+            self.logger.new(o!("prewrite" => "Committer")),
         ));
         self.committer.as_mut().unwrap().prewrite().await?;
         debug!(
