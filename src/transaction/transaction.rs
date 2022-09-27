@@ -500,7 +500,7 @@ impl<PdC: PdClient> Transaction<PdC> {
     /// # });
     /// ```
     pub async fn delete(&mut self, key: impl Into<Key>) -> Result<()> {
-        debug!(self.logger, "invoking transactional delete request");
+        trace!(self.logger, "invoking transactional delete request");
         self.check_allow_operation().await?;
         let key = key.into();
         if self.is_pessimistic() {
@@ -748,7 +748,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             self.logger.new(o!("prewrite" => "Committer")),
         ));
         self.committer.as_mut().unwrap().prewrite().await?;
-        debug!(
+        info!(
             self.logger,
             "prewrite finished, primary={}, start_ts={:?}",
             primary,
