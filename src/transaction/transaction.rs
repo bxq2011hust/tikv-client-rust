@@ -1445,9 +1445,9 @@ impl<PdC: PdClient> Committer<PdC> {
         }
         lock_ttl
     }
-    fn get_primary_key(&self) -> Option<Key> {
-        self.primary_key.clone()
-    }
+    // fn get_primary_key(&self) -> Option<Key> {
+    //     self.primary_key.clone()
+    // }
 }
 
 #[derive(PartialEq, Eq)]

@@ -423,6 +423,10 @@ where
             }
 
             if self.backoff.is_none() {
+                debug!(
+                    slog_scope::logger(),
+                    "resolve lock failed because backoff is none, locks={:?}", locks
+                );
                 return Err(Error::ResolveLockError);
             }
 
@@ -431,7 +435,13 @@ where
                 result = self.inner.execute().await?;
             } else {
                 match clone.backoff.next_delay_duration() {
-                    None => return Err(Error::ResolveLockError),
+                    None => {
+                        debug!(
+                            slog_scope::logger(),
+                            "resolve lock failed because next_delay_duration is none"
+                        );
+                        return Err(Error::ResolveLockError);
+                    }
                     Some(delay_duration) => {
                         futures_timer::Delay::new(delay_duration).await;
                         result = clone.inner.execute().await?;

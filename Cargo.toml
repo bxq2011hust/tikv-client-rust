@@ -44,6 +44,7 @@ tikv-client-pd = { version = "0.1.0", path = "tikv-client-pd" }
 tikv-client-proto = { version = "0.1.0", path = "tikv-client-proto" }
 tikv-client-store = { version = "0.1.0", path = "tikv-client-store" }
 slog-async = "2.7.0"
+slog-scope = "4.4.0"
 
 [dev-dependencies]
 clap = "2"
