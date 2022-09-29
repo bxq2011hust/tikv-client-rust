@@ -7,9 +7,10 @@ use crate::{
         Collect, CollectError, CollectSingle, CollectWithShard, Plan, PlanBuilder, RetryOptions,
     },
     timestamp::TimestampExt,
-    transaction::{buffer::Buffer, lowering::*},
+    transaction::{buffer::Buffer, lowering::*, requests::TransactionStatusKind},
     BoundRange, Error, Key, KvPair, Result, Value,
 };
+
 use derive_new::new;
 use fail::fail_point;
 use futures::prelude::*;
@@ -644,7 +645,50 @@ impl<PdC: PdClient> Transaction<PdC> {
                 return Err(Error::OperationAfterCommitError);
             }
         }
+        // before rollback, check if the transaction has been committed.
+        let current_timestamp = self.rpc.clone().get_timestamp().await?;
+        let primary_key = self.buffer.get_primary_key();
+        let request = new_check_txn_status_request(
+            primary_key.clone().unwrap(),
+            self.timestamp.clone(),
+            current_timestamp.clone(),
+        );
+        let plan = PlanBuilder::new(self.rpc.clone(), request)
+            .retry_multi_region(DEFAULT_REGION_BACKOFF)
+            .merge(CollectSingle)
+            .post_process_default()
+            .plan();
+        let status = plan.execute().await?;
 
+        match status.kind {
+            TransactionStatusKind::Committed(commit_ts) => {
+                // do nothing modify status to committed
+                info!(
+                    self.logger,
+                    "the rollback transaction has been committed, start_ts={:?} ,commit_ts={:?}",
+                    self.timestamp.clone(),
+                    commit_ts
+                );
+                {
+                    let mut status = self.status.write().await;
+                    *status = TransactionStatus::Committed;
+                }
+                if self.committer.is_some() {
+                    self.commit_secondary(commit_ts.clone()).await;
+                }
+                return Ok(());
+            }
+            TransactionStatusKind::RolledBack => {
+                info!(self.logger, "transaction has been rolled back");
+            }
+            TransactionStatusKind::Locked(ttl, lock_info) => {
+                // do nothing before ttl expire
+                info!(
+                    self.logger,
+                    "transaction has been locked, ttl={:?}, lock_info={:?}", ttl, lock_info
+                );
+            }
+        }
         {
             let mut status = self.status.write().await;
             *status = TransactionStatus::StartedRollback;
@@ -654,7 +698,6 @@ impl<PdC: PdClient> Transaction<PdC> {
             let committer = std::mem::replace(&mut self.committer, None);
             res = committer.unwrap().rollback().await;
         } else {
-            let primary_key = self.buffer.get_primary_key();
             let mutations = self.buffer.to_proto_mutations();
             res = Committer::new(
                 primary_key,
@@ -728,6 +771,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             }
             *status = TransactionStatus::StartedCommit;
         }
+        self.buffer.set_primary_key(&primary_key);
         let mutations = self.buffer.to_proto_mutations();
         if mutations.is_empty() {
             error!(self.logger, "prewrite use empty buffer");

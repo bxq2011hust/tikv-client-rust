@@ -531,6 +531,22 @@ impl Process<kvrpcpb::TxnHeartBeatResponse> for DefaultProcessor {
     }
 }
 
+pub fn new_check_txn_status_request(
+    primary_key: Vec<u8>,
+    lock_ts: u64,
+    caller_start_ts: u64,
+    current_ts: u64,
+) -> kvrpcpb::CheckTxnStatusRequest {
+    let mut req = kvrpcpb::CheckTxnStatusRequest::default();
+    req.set_primary_key(primary_key);
+    req.set_lock_ts(lock_ts);
+    req.set_caller_start_ts(caller_start_ts);
+    req.set_current_ts(current_ts);
+    req.set_rollback_if_not_exist(false);
+    req.set_force_sync_commit(false);
+    req
+}
+
 impl KvRequest for kvrpcpb::CheckTxnStatusRequest {
     type Response = kvrpcpb::CheckTxnStatusResponse;
 }
@@ -552,6 +568,7 @@ impl Shardable for kvrpcpb::CheckTxnStatusRequest {
         Ok(())
     }
 }
+collect_first!(kvrpcpb::CheckTxnStatusResponse);
 
 impl SingleKey for kvrpcpb::CheckTxnStatusRequest {
     fn key(&self) -> &Vec<u8> {

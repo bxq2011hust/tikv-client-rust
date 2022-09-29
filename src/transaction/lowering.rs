@@ -175,3 +175,16 @@ pub fn new_heart_beat_request(
 ) -> kvrpcpb::TxnHeartBeatRequest {
     requests::new_heart_beat_request(start_ts.version(), primary_lock.into(), ttl)
 }
+
+pub fn new_check_txn_status_request(
+    primary_lock: Key,
+    start_ts: Timestamp,
+    current_ts: Timestamp,
+) -> kvrpcpb::CheckTxnStatusRequest {
+    requests::new_check_txn_status_request(
+        primary_lock.into(),
+        start_ts.version(),
+        start_ts.version(),
+        current_ts.version(),
+    )
+}
