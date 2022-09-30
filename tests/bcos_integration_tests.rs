@@ -20,7 +20,6 @@ use serial_test::serial;
 use std::{
     collections::{HashMap, HashSet},
     convert::TryInto,
-    // fs::OpenOptions,
     iter, println,
 };
 use tikv_client::{
@@ -773,9 +772,66 @@ async fn bcos_txn_rollback_after_primary_committed() -> Result<()> {
     t1.prewrite_secondary(primary_key, start_ts).await?;
     let prewrite_duration = start.elapsed();
     let start = Instant::now();
+    let _commit_ts = t0.commit_primary().await?;
+    t0.rollback().await?;
+    t1.rollback().await?;
+    // t1.commit_secondary(commit_ts).await;
+    let commit_duration = start.elapsed();
+    println!(
+        "Time elapsed in prewrite is: {:?},in commit is: {:?}",
+        prewrite_duration, commit_duration
+    );
+    // check
+    let mut snapshot = client.snapshot(
+        client.current_timestamp().await?,
+        TransactionOptions::new_optimistic(),
+    );
+    let batch_get_res: HashMap<Key, Value> = snapshot
+        .batch_get(keys.clone())
+        .await?
+        .map(|pair| (pair.0, pair.1))
+        .collect();
+    for (i, k) in keys.iter().enumerate() {
+        assert_eq!(
+            batch_get_res.get(&Key::from(k.clone())).unwrap(),
+            values.get(i).unwrap()
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn bcos_txn_resolve_locks_before_expired() -> Result<()> {
+    init().await?;
+    let client = TransactionClient::new_with_config(pd_addrs(), Default::default(), None).await?;
+    let loop_count = 10;
+    let mut t0 = client.begin_optimistic().await?;
+    let a = "a".to_owned();
+    let b = "b".to_owned();
+    let c = "c".to_owned();
+    t0.put(a.clone(), a.clone()).await?;
+    t0.put(b.clone(), b.clone()).await?;
+    t0.put(c.clone(), c.clone()).await?;
+
+    let mut t1 = client.begin_optimistic().await?;
+    let mut keys = vec![];
+    let mut values = vec![];
+    for j in 0..loop_count {
+        let key = format!("key_________________________{}", j);
+        let value: Vec<u8> = (0..1024).map(|_| rand::random::<u8>()).collect();
+        keys.push(key.clone());
+        values.push(value.clone());
+        t1.put(key.clone(), value.clone()).await?;
+    }
+    println!("start prewrite");
+    let start = Instant::now();
+    let (primary_key, start_ts) = t0.prewrite_primary(None).await?;
+    t1.prewrite_secondary(primary_key, start_ts).await?;
+    let prewrite_duration = start.elapsed();
+    let start = Instant::now();
     let commit_ts = t0.commit_primary().await?;
-    t0.rollback().await;
-    t1.rollback().await;
+    t0.commit_secondary(commit_ts.clone()).await;
     // t1.commit_secondary(commit_ts).await;
     let commit_duration = start.elapsed();
     println!(

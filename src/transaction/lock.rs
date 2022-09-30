@@ -32,7 +32,7 @@ pub async fn resolve_locks(
     debug!("resolving locks");
     let ts = pd_client.clone().get_timestamp().await?;
     let mut has_live_locks = false;
-    let expired_locks = locks.into_iter().filter(|lock| {
+    let (mut expired_locks, live_locks): (Vec<_>, Vec<_>) = locks.into_iter().partition(|lock| {
         let expired = ts.physical - Timestamp::from_version(lock.lock_version).physical
             >= lock.lock_ttl as i64;
         if !expired {
@@ -40,6 +40,46 @@ pub async fn resolve_locks(
         }
         expired
     });
+    if expired_locks.is_empty() {
+        let mut live_lock_commit_versions: HashMap<u64, u64> = HashMap::new();
+        let current_timestamp = pd_client.clone().get_timestamp().await?;
+        for lock in live_locks {
+            let commit_version = match live_lock_commit_versions.get(&lock.lock_version) {
+                Some(&commit_version) => commit_version,
+                None => {
+                    let request = requests::new_check_txn_status_request(
+                        lock.get_primary_lock().into(),
+                        lock.lock_version,
+                        lock.lock_version,
+                        current_timestamp.clone().version(),
+                    );
+                    let plan = crate::request::PlanBuilder::new(pd_client.clone(), request)
+                        .retry_multi_region(DEFAULT_REGION_BACKOFF)
+                        .merge(CollectSingle)
+                        .post_process_default()
+                        .plan();
+                    match plan.execute().await {
+                        Ok(status) => match status.kind {
+                            requests::TransactionStatusKind::Committed(commit_ts) => {
+                                commit_ts.version()
+                            }
+                            requests::TransactionStatusKind::RolledBack => 0,
+                            requests::TransactionStatusKind::Locked(_, _) => 0,
+                        },
+                        Err(e) => {
+                            debug!("failed to check txn status: {:?}", e);
+                            0
+                        }
+                    }
+                }
+            };
+            if commit_version > lock.lock_version {
+                expired_locks.push(lock);
+            } else {
+                live_lock_commit_versions.insert(lock.lock_version, commit_version);
+            }
+        }
+    }
 
     // records the commit version of each primary lock (representing the status of the transaction)
     let mut commit_versions: HashMap<u64, u64> = HashMap::new();
