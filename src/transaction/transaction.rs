@@ -1318,6 +1318,7 @@ impl<PdC: PdClient> Committer<PdC> {
                 Ok(commit_ts) => commit_ts,
                 Err(e) => {
                     return if self.undetermined {
+                        error!(self.logger, "commit err:{}", e);
                         Err(Error::UndeterminedError(Box::new(e)))
                     } else {
                         Err(e)

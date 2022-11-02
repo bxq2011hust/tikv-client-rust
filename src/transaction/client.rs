@@ -284,4 +284,9 @@ impl Client {
         let logger = self.logger.new(o!("child" => 1));
         Transaction::new(timestamp, self.pd.clone(), options, logger)
     }
+
+    pub fn new_transaction_with_options(&self, timestamp: Timestamp, options: TransactionOptions) -> Transaction {
+        let logger = self.logger.new(o!("child" => 1));
+        Transaction::new(timestamp, self.pd.clone(), options, logger)
+    }
 }
