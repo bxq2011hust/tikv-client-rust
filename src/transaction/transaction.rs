@@ -763,6 +763,7 @@ impl<PdC: PdClient> Transaction<PdC> {
             start_ts.version(),
             primary_key
         );
+        let start = Instant::now();
         {
             let mut status = self.status.write().await;
             if !matches!(
@@ -796,9 +797,10 @@ impl<PdC: PdClient> Transaction<PdC> {
         self.committer.as_mut().unwrap().prewrite().await?;
         info!(
             self.logger,
-            "prewrite finished, primary={}, start_ts={:?}",
+            "prewrite finished, primary={}, start_ts={:?}, time={:?}",
             primary,
             self.timestamp.version(),
+            start.elapsed(),
         );
         Ok(())
     }
@@ -1336,6 +1338,7 @@ impl<PdC: PdClient> Committer<PdC> {
 
     async fn prewrite(&mut self) -> Result<Option<Timestamp>> {
         debug!(self.logger, "prewriting");
+        let start = Instant::now();
         let primary_lock = self.primary_key.clone().unwrap();
         let elapsed = self.start_instant.elapsed().as_millis() as u64;
         let lock_ttl = self.calc_txn_lock_ttl();
@@ -1363,8 +1366,9 @@ impl<PdC: PdClient> Committer<PdC> {
             .filter(|m| self.primary_key.as_ref().unwrap() != m.key.as_ref())
             .map(|m| m.key.clone())
             .collect();
-        // FIXME set max_commit_ts and min_commit_ts
-
+        // FIXME: set max_commit_ts and min_commit_ts
+        let prepare_request_duration = start.elapsed();
+        let start = Instant::now();
         let plan = PlanBuilder::new(self.rpc.clone(), request)
             .resolve_lock(self.options.retry_options.lock_backoff.clone())
             .retry_multi_region(self.options.retry_options.region_backoff.clone())
@@ -1372,6 +1376,7 @@ impl<PdC: PdClient> Committer<PdC> {
             .extract_error()
             .plan();
         let response = plan.execute().await?;
+        let request_duration = start.elapsed();
 
         if self.options.try_one_pc && response.len() == 1 {
             if response[0].one_pc_commit_ts == 0 {
@@ -1391,7 +1396,12 @@ impl<PdC: PdClient> Committer<PdC> {
             })
             .max()
             .map(Timestamp::from_version);
-
+        debug!(
+            self.logger,
+            "prewrite finished, prepare_request_duration:{:?}, request_duration:{:?}",
+            prepare_request_duration,
+            request_duration
+        );
         Ok(min_commit_ts)
     }
 
@@ -1420,7 +1430,6 @@ impl<PdC: PdClient> Committer<PdC> {
                 }
             })
             .await?;
-
         Ok(commit_version)
     }
 

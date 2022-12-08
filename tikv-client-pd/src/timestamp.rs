@@ -20,7 +20,7 @@ use futures::{
     task::{AtomicWaker, Context, Poll},
 };
 use grpcio::WriteFlags;
-use log::debug;
+use log::trace;
 use std::{cell::RefCell, collections::VecDeque, pin::Pin, rc::Rc, thread};
 use tikv_client_common::internal_err;
 use tikv_client_proto::pdpb::*;
@@ -64,7 +64,7 @@ impl TimestampOracle {
     }
 
     pub(crate) async fn get_timestamp(mut self) -> Result<Timestamp> {
-        debug!("getting current timestamp");
+        trace!("getting current timestamp");
         let (request, response) = oneshot::channel();
         self.request_tx
             .send(request)

@@ -864,39 +864,44 @@ async fn bcos_txn_commit100() -> Result<()> {
     let client = TransactionClient::new_with_config(pd_addrs(), Default::default(), None).await?;
     // FIXME: if the commit size of a region is large than raft-entry-max-size maybe failed
     let commit_size = 1024;
+    let value_size = 256;
     let loop_count = 100;
     for i in 0..loop_count {
         let mut t0 = client.begin_optimistic().await?;
-        let a = "a".to_owned();
-        let b = "b".to_owned();
-        let c = "c".to_owned();
-        t0.put(a.clone(), a.clone()).await?;
-        t0.put(b.clone(), b.clone()).await?;
-        t0.put(c.clone(), c.clone()).await?;
-
         let mut t1 = client.begin_optimistic().await?;
         let mut keys = vec![];
         let mut values = vec![];
+        let mut keys2 = vec![];
+        let mut values2 = vec![];
         for j in 0..commit_size {
-            let key = format!("key___________________________{}", j);
-            let value: Vec<u8> = (0..3072).map(|_| rand::random::<u8>()).collect();
+            let key = format!("1st_key___________________________{}", j);
+            let value: Vec<u8> = (0..value_size).map(|_| rand::random::<u8>()).collect();
             keys.push(key.clone());
             values.push(value.clone());
+            t0.put(key.clone(), value.clone()).await?;
+        }
+        for j in 0..commit_size {
+            let key = format!("2nd_key___________________________{}", j);
+            let value: Vec<u8> = (0..value_size).map(|_| rand::random::<u8>()).collect();
+            keys2.push(key.clone());
+            values2.push(value.clone());
             t1.put(key.clone(), value.clone()).await?;
         }
         println!("{} start prewrite", i);
         let start = Instant::now();
         let (primary_key, start_ts) = t0.prewrite_primary(None).await?;
+        let primary_prewrite_duration = start.elapsed();
         t1.prewrite_secondary(primary_key, start_ts).await?;
         let prewrite_duration = start.elapsed();
         let start = Instant::now();
         let commit_ts = t0.commit_primary().await?;
         t0.commit_secondary(commit_ts.clone()).await;
+        let primary_commit_duration = start.elapsed();
         t1.commit_secondary(commit_ts).await;
         let commit_duration = start.elapsed();
         println!(
-            "{} Time elapsed in prewrite is: {:?},in commit is: {:?}",
-            i, prewrite_duration, commit_duration
+            "{} Time elapsed in prewrite is: {:?}/{:?},in commit is: {:?}/{:?}",
+            i, primary_prewrite_duration, prewrite_duration, primary_commit_duration, commit_duration
         );
         // check
         let mut snapshot = client.snapshot(
