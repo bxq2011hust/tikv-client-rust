@@ -864,8 +864,8 @@ async fn bcos_txn_commit100() -> Result<()> {
     let client = TransactionClient::new_with_config(pd_addrs(), Default::default(), None).await?;
     // FIXME: if the commit size of a region is large than raft-entry-max-size maybe failed
     let commit_size = 1024;
-    let value_size = 256;
-    let loop_count = 100;
+    let value_size = 512;
+    let loop_count = 20;
     for i in 0..loop_count {
         let mut t0 = client.begin_optimistic().await?;
         let mut t1 = client.begin_optimistic().await?;
@@ -874,14 +874,22 @@ async fn bcos_txn_commit100() -> Result<()> {
         let mut keys2 = vec![];
         let mut values2 = vec![];
         for j in 0..commit_size {
-            let key = format!("1st_key___________________________{}", j);
+            let key: Vec<u8> = b"s_txs_"
+                .to_vec()
+                .into_iter()
+                .chain((0..40).map(|_| rand::random::<u8>()))
+                .collect();
             let value: Vec<u8> = (0..value_size).map(|_| rand::random::<u8>()).collect();
             keys.push(key.clone());
             values.push(value.clone());
             t0.put(key.clone(), value.clone()).await?;
         }
-        for j in 0..commit_size {
-            let key = format!("2nd_key___________________________{}", j);
+        for j in 0..commit_size * 5 {
+            let key: Vec<u8> = b"s_receipts_"
+                .to_vec()
+                .into_iter()
+                .chain((0..32).map(|_| rand::random::<u8>()))
+                .collect();
             let value: Vec<u8> = (0..value_size).map(|_| rand::random::<u8>()).collect();
             keys2.push(key.clone());
             values2.push(value.clone());
@@ -901,7 +909,11 @@ async fn bcos_txn_commit100() -> Result<()> {
         let commit_duration = start.elapsed();
         println!(
             "{} Time elapsed in prewrite is: {:?}/{:?},in commit is: {:?}/{:?}",
-            i, primary_prewrite_duration, prewrite_duration, primary_commit_duration, commit_duration
+            i,
+            primary_prewrite_duration,
+            prewrite_duration,
+            primary_commit_duration,
+            commit_duration
         );
         // check
         let mut snapshot = client.snapshot(
