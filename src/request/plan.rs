@@ -5,10 +5,10 @@ use std::{marker::PhantomData, sync::Arc};
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 use futures::{future::try_join_all, prelude::*};
+use log::debug;
 use tikv_client_proto::{errorpb, errorpb::EpochNotMatch, kvrpcpb};
 use tikv_client_store::{HasKeyErrors, HasRegionError, HasRegionErrors, KvClient};
 use tokio::sync::Semaphore;
-use log::{debug};
 
 use crate::{
     backoff::Backoff,
@@ -48,7 +48,7 @@ impl<Req: KvRequest> Plan for Dispatch<Req> {
         let result = self
             .kv_client
             .as_ref()
-            .expect("Unreachable: kv_client has not been initialised in Dispatch")
+            .expect("Unreachable: kv_client has not been initialized in Dispatch")
             .dispatch(&self.request)
             .await;
         let result = stats.done(result);
@@ -87,6 +87,7 @@ where
     ) -> Result<<Self as Plan>::Result> {
         let shards = current_plan.shards(&pd_client).collect::<Vec<_>>().await;
         let mut handles = Vec::new();
+        debug!("retry_multi_region request shard size = {}", shards.len());
         for shard in shards {
             let (shard, region_store) = shard?;
             let mut clone = current_plan.clone();
@@ -425,7 +426,8 @@ where
 
             if self.backoff.is_none() {
                 debug!(
-                    "resolve lock failed because backoff is none, locks={:?}", locks
+                    "resolve lock failed because backoff is none, locks={:?}",
+                    locks
                 );
                 return Err(Error::ResolveLockError);
             }
