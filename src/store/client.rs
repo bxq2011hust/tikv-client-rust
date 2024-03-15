@@ -33,7 +33,9 @@ impl KvConnect for TikvConnect {
 
     async fn connect(&self, address: &str) -> Result<KvRpcClient> {
         self.security_mgr
-            .connect(address, TikvClient::new)
+            .connect(address, |channel| {
+                TikvClient::new(channel).max_decoding_message_size(256 << 20)
+            })
             .await
             .map(|c| KvRpcClient::new(c, self.timeout))
     }
